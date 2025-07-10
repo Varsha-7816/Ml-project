@@ -1,0 +1,283 @@
+def staged_random_sleep_stages(total_sleep, index, total_rows):
+    #Returns (light, deep, rem) times in hours, derived from total_sleep
+    #divide the dataset into 3 roughly equal parts:
+    #Subset 1:lower Deep Sleep fraction, higher Light Sleep fraction
+    #Subset 2:moderate Deep Sleep fraction
+    #Subset 3:higher Deep Sleep fraction, lower Light Sleep fraction
+    
+    # Decide which "band" this row falls into
+    if index < total_rows / 3:
+        # Cluster 0: e.g. Light ~0.50, Deep ~0.25, REM ~0.25
+        base_light = 0.50
+        base_deep  = 0.25
+        base_rem   = 0.25
+        variation  = 0.02
+    elif index < 2 * total_rows / 3:
+        # Cluster 1: e.g. Light ~0.55, Deep ~0.20, REM ~0.25
+        base_light = 0.55
+        base_deep  = 0.20
+        base_rem   = 0.25
+        variation  = 0.02
+    else:
+        # Cluster 2: e.g. Light ~0.60, Deep ~0.15, REM ~0.25
+        base_light = 0.60
+        base_deep  = 0.15
+        base_rem   = 0.25
+        variation  = 0.02
+    
+    # Add small random variation around these base fractions
+    l_frac = base_light + np.random.uniform(-variation, variation)
+    d_frac = base_deep  + np.random.uniform(-variation, variation)
+    r_frac = base_rem   + np.random.uniform(-variation, variation)
+    
+    # Normalize so fractions sum to 1
+    total_frac = l_frac + d_frac + r_frac
+    l_frac /= total_frac
+    d_frac /= total_frac
+    r_frac /= total_frac
+    
+    # Multiply by total_sleep to get actual hours
+    return (
+        total_sleep * l_frac,
+        total_sleep * d_frac,
+        total_sleep * r_frac
+    )
+
+#new columns for Light/Deep/REM
+df["Light Sleep Time"] = np.nan
+df["Deep Sleep Time"]  = np.nan
+df["REM Sleep Time"]   = np.nan
+
+df = df.reset_index(drop=True)  # so row indices go from 0..N-1
+total_rows = len(df)
+
+for i in range(total_rows):
+    if pd.isnull(df.loc[i, "Sleep Duration"]):
+        continue
+    total_sleep = df.loc[i, "Sleep Duration"]
+    
+    l_val, d_val, r_val = staged_random_sleep_stages(total_sleep, i, total_rows)
+    
+    df.loc[i,"Light Sleep Time"] = l_val
+    df.loc[i,"Deep Sleep Time"]  = d_val
+    df.loc[i,"REM Sleep Time"]   = r_val
+df_nonan = df.dropna(subset=["Light Sleep Time", "Deep Sleep Time", "REM Sleep Time"]).copy()
+X = df_nonan[["Light Sleep Time", "Deep Sleep Time", "REM Sleep Time"]].values
+import os
+os.environ["OMP_NUM_THREADS"] = "2"
+
+# K-Means Clustering on (Light, Deep, REM)
+kmeans = KMeans(n_clusters=3, random_state=42)
+clusters = kmeans.fit_predict(X)
+centroids = kmeans.cluster_centers_
+
+# Store the clusters
+df_nonan["Cluster"] = clusters
+
+#3D Scatter Plot
+fig = plt.figure(figsize=(8, 6))
+ax = fig.add_subplot(111, projection='3d')
+colors = ['blue', 'red', 'green']
+for cluster_id in range(3):
+    cluster_data = df_nonan[df_nonan["Cluster"] == cluster_id]
+    ax.scatter(cluster_data["Light Sleep Time"],cluster_data["Deep Sleep Time"],cluster_data["REM Sleep Time"],c=colors[cluster_id],
+    label=f'Cluster {cluster_id}',s=20)
+
+# Plot the centroids
+ax.scatter(centroids[:, 0],centroids[:, 1],centroids[:, 2],marker='X',s=200,c='black',label='Centroids')
+
+ax.set_xlabel('Light Sleep Time')
+ax.set_ylabel('Deep Sleep Time')
+ax.set_zlabel('REM Sleep Time')
+ax.set_title('K-Means Clustering')
+
+plt.legend()
+plt.show()
+
+# Compute the average sleep quality for each cluster
+cluster_quality = df_nonan.groupby("Cluster")["Quality of Sleep"].mean()
+print("Average Sleep Quality per cluster:")
+print(cluster_quality)
+
+sorted_clusters = cluster_quality.sort_values().index.tolist()
+print("Sorted clusters by Sleep Quality:", sorted_clusters)
+mapping = {old_label: new_label for new_label, old_label in enumerate(sorted_clusters)}
+print("Mapping:", mapping)
+
+# Map the original cluster labels to new quality labels
+df_nonan["Quality Label"] = df_nonan["Cluster"].map(mapping)
+
+# 0 = low quality, 1 = medium quality, 2 = high quality (based on the average Sleep Quality)
+df_nonan[["Cluster", "Quality of Sleep", "Quality Label"]].head()
+
+# Map the original cluster labels to new quality labels
+df_nonan["Quality Label"] = df_nonan["Cluster"].map(mapping)
+
+# 0 = low quality, 1 = medium quality, 2 = high quality (based on the average Sleep Quality)
+df_nonan[["Cluster", "Quality of Sleep", "Quality Label"]].head()
+
+#Encoding
+df_encoded = df_nonan.copy()
+df_encoded[['Systolic BP', 'Diastolic BP']] = df_nonan['Blood Pressure'].str.split('/', expand=True).astype(float)
+df_encoded.drop(columns=['Blood Pressure'], inplace=True)
+
+categorical_cols = ["Gender", "Occupation", "BMI Category"]
+from sklearn.preprocessing import LabelEncoder
+label_encoders = {}
+for col in categorical_cols:
+    le = LabelEncoder()
+    df_encoded[col] = le.fit_transform(df_encoded[col])
+    label_encoders[col] = le 
+
+df_encoded.drop(columns=['Light Sleep Time','Deep Sleep Time','REM Sleep Time'],inplace=True)
+df_encoded.head()
+
+#health indicators
+df_encoded["Sleep Disorder"] = df_encoded["Sleep Disorder"].fillna("none").astype(str)
+
+# Create the binary column: 0 if the disorder is 'none', 1 otherwise.
+df_encoded["Disorder Binary"] = df_encoded["Sleep Disorder"].apply(
+    lambda x: 0 if x.strip().lower() == "none" else 1
+)
+df_encoded.drop(columns=["Sleep Disorder"],inplace=True)
+# Count the occurrences of 0 and 1 in the "Disorder Binary" column
+label_counts = df_encoded["Disorder Binary"].value_counts()
+print("Disorder Binary Label Counts:")
+print(label_counts)
+
+cols = df_encoded.columns.tolist()
+
+# Move 'Systolic BP' and 'Diastolic BP' before 'Clusters'
+cols.remove('Systolic BP')
+cols.remove('Diastolic BP')
+cols.remove('Disorder Binary')
+cols.insert(cols.index('Cluster'), 'Disorder Binary')
+cols.insert(cols.index('Cluster')-2, 'Systolic BP')
+cols.insert(cols.index('Cluster') - 3, 'Diastolic BP')
+
+# Reorder the DataFrame
+df_encoded = df_encoded[cols]
+
+# Display updated DataFrame
+df_encoded.head()
+
+# Count the number of each label (0, 1, 2)
+label_counts = df_encoded["Quality Label"].value_counts().sort_index()
+print("Count of Quality Labels:")
+print(label_counts)
+
+#Splitiing the dataset based on sleep quality groups
+df_low = df_encoded[df_encoded["Quality Label"] == 0].copy()
+df_med = df_encoded[df_encoded["Quality Label"] == 1].copy()
+df_high = df_encoded[df_encoded["Quality Label"] == 2].copy()
+
+df_low.shape
+
+X_low = df_low.iloc[:,0:13]
+y_low = df_low['Disorder Binary']
+
+label_counts = y_low.value_counts()
+print("No of disoder labels:", label_counts)
+
+smote = SMOTE(random_state=42)
+X_resampled, y_resampled = smote.fit_resample(X_low, y_low)
+
+label_counts = y_resampled.value_counts()
+print("Label counts after SMOTE:", label_counts)
+
+scaler = StandardScaler()
+X_norm =  pd.DataFrame(scaler.fit_transform(X_resampled), columns=X_resampled.columns)
+df = X_norm.copy()
+df["Disorder Binary"] = y_resampled.reset_index(drop=True)
+df.head()
+
+X_train, X_test, y_train, y_test = train_test_split(X_low, y_low, test_size=0.1, random_state=42,stratify=y_low)
+
+clf = RandomForestClassifier(n_estimators=100, random_state=42)
+clf.fit(X_train, y_train)
+y_pred = clf.predict(X_test)
+
+#model performance
+print("Classification Report:")
+print(classification_report(y_test, y_pred))
+
+cm = ConfusionMatrixDisplay(confusion_matrix(y_test,y_pred),display_labels=grid_model.classes_)
+cm.plot(cmap='Blues')
+
+accuracy_low = accuracy_score(y_test, y_pred)
+precision_low = precision_score(y_test, y_pred)
+recall_low = recall_score(y_test, y_pred)
+f1_score_low = f1_score(y_test, y_pred)
+
+X_med = df_med.iloc[:,0:13]
+y_med = df_med['Disorder Binary']
+label_counts = y_med.value_counts()
+print("No of disoder labels:", label_counts)
+
+smote = SMOTE(random_state=42)
+X_resampled, y_resampled = smote.fit_resample(X_med, y_med)
+label_counts = y_resampled.value_counts()
+print("Label counts after SMOTE:", label_counts)
+
+scaler = StandardScaler()
+X_norm =  pd.DataFrame(scaler.fit_transform(X_resampled), columns=X_resampled.columns)
+df = X_norm.copy()
+df["Disorder Binary"] = y_resampled.reset_index(drop=True)
+df.head()
+
+X_train, X_test, y_train, y_test = train_test_split(X_med, y_med, test_size=0.1, random_state=42,stratify=y_med)
+clf = RandomForestClassifier(n_estimators=100, random_state=42)
+clf.fit(X_train, y_train)
+y_pred = clf.predict(X_test)
+
+#model performance
+print("Classification Report:")
+print(classification_report(y_test, y_pred,zero_division=1))
+
+cm = ConfusionMatrixDisplay(confusion_matrix(y_test,y_pred),display_labels=grid_model.classes_)
+cm.plot(cmap='Blues')
+
+accuracy_med = accuracy_score(y_test, y_pred)
+precision_med = precision_score(y_test, y_pred,zero_division=1)
+recall_med = recall_score(y_test, y_pred)
+f1_score_med = f1_score(y_test, y_pred)
+
+X_high = df_high.iloc[:,0:13]
+y_high = df_high['Disorder Binary']
+label_counts = y_high.value_counts()
+print("No of disoder labels:", label_counts)
+
+scaler = StandardScaler()
+X_norm =  pd.DataFrame(scaler.fit_transform(X_high), columns=X_high.columns)
+df = X_norm.copy()
+df["Disorder Binary"] = y_high.reset_index(drop=True)
+df.head()
+
+X_train, X_test, y_train, y_test = train_test_split(X_high, y_high, test_size=0.1, random_state=42,stratify=y_high)
+clf = RandomForestClassifier(n_estimators=100, random_state=42)
+clf.fit(X_train, y_train)
+
+y_pred = clf.predict(X_test)
+
+#model performance
+print("Classification Report:")
+print(classification_report(y_test, y_pred,zero_division=1))
+
+cm = ConfusionMatrixDisplay(confusion_matrix(y_test,y_pred),display_labels=grid_model.classes_)
+cm.plot(cmap='Blues')
+
+accuracy_high = accuracy_score(y_test, y_pred)
+precision_high = precision_score(y_test, y_pred,zero_division=1)
+recall_high = recall_score(y_test, y_pred)
+f1_score_high = f1_score(y_test, y_pred)
+
+metrics_data = {
+    'Metric': ['Accuracy', 'Precision', 'Recall', 'F1-Score'],
+    'Low Quality': [accuracy_low, precision_low, recall_low, f1_score_low],
+    'Medium Quality': [accuracy_med, precision_med, recall_med, f1_score_med],
+    'High Quality': [accuracy_high, precision_high, recall_high, f1_score_high]
+}
+
+# Create DataFrame
+metrics_df = pd.DataFrame(metrics_data)
+metrics_df
